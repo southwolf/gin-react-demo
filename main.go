@@ -1,8 +1,14 @@
 package main
 
 import (
+	"errors"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
+
+	jwtmiddleware "github.com/auth0/go-jwt-middleware"
+	jwt "github.com/dgrijalva/jwt-go"
 
 	"github.com/gin-gonic/contrib/static"
 	"github.com/gin-gonic/gin"
@@ -25,7 +31,34 @@ var jokes = []Joke{
 	Joke{7, 0, "How does a penguin build it's house? Igloos it together."},
 }
 
+var jwtMiddleWare *jwtmiddleware.JWTMiddleware
+
+var cert = os.Getenv("AUTH0_CERT")
+
 func main() {
+	jwtMiddleware := jwtmiddleware.New(jwtmiddleware.Options{
+		ValidationKeyGetter: func(token *jwt.Token) (interface{}, error) {
+			aud := os.Getenv("AUTH0_API_AUDIENCE")
+
+			checkAudience := token.Claims.(jwt.MapClaims).VerifyAudience(aud, false)
+			if !checkAudience {
+				return token, errors.New("invalid audience")
+			}
+
+			iss := os.Getenv("AUTH0_DOMAIN")
+			checkIss := token.Claims.(jwt.MapClaims).VerifyIssuer(iss, false)
+			if !checkIss {
+				return token, errors.New("invalid issuer")
+			}
+
+			result, _ := jwt.ParseRSAPublicKeyFromPEM([]byte(cert))
+			return result, nil
+		},
+		SigningMethod: jwt.SigningMethodRS256,
+	})
+
+	jwtMiddleWare = jwtMiddleware
+
 	router := gin.Default()
 
 	router.Use(static.Serve("/", static.LocalFile("./views", true)))
@@ -38,8 +71,8 @@ func main() {
 			})
 		})
 
-		api.GET("/jokes", JokeHandler)
-		api.POST("/jokes/like/:jokeID", LikeJoke)
+		api.GET("/jokes", authMiddleWare(), JokeHandler)
+		api.POST("/jokes/like/:jokeID", authMiddleWare(), LikeJoke)
 	}
 
 	router.Run(":3000")
@@ -64,5 +97,19 @@ func LikeJoke(c *gin.Context) {
 		c.JSON(http.StatusOK, &jokes)
 	} else {
 		c.AbortWithStatus(http.StatusNotFound)
+	}
+}
+
+// authMiddleware intercepts the requests, and check for a valid jwt token
+func authMiddleWare() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		err := jwtMiddleWare.CheckJWT(c.Writer, c.Request)
+		if err != nil {
+			log.Println(err)
+			c.Abort()
+			c.Writer.WriteHeader(http.StatusUnauthorized)
+			c.Writer.Write([]byte("Unauthorized"))
+			return
+		}
 	}
 }
